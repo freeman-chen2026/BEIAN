@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
+from openpyxl.styles import Alignment
 
 st.set_page_config(page_title="每日通航运行情况跟踪表生成器", layout="wide")
 st.title("🛫 每日通航运行情况跟踪表生成器")
@@ -49,7 +50,7 @@ def map_usage(usage):
 
 def format_time(value):
     """将时间值格式化为 HH:MM:SS，若为空则返回空字符串"""
-    if pd.isna(value) or value == "":
+    if pd.isna(value) or value == "" or value is None:
         return ""
     # 如果已经是字符串且不含秒，补 :00
     if isinstance(value, str):
@@ -162,11 +163,17 @@ if uploaded_file is not None:
         st.subheader("📋 转换后的跟踪表（预览）")
         st.dataframe(df_output, use_container_width=True)
 
-        # 导出 Excel
+        # ---------- 导出 Excel（设置所有单元格居中） ----------
         def to_excel_bytes(df):
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df.to_excel(writer, sheet_name="Sheet1", index=False)
+                workbook = writer.book
+                worksheet = writer.sheets["Sheet1"]
+                # 对每个单元格设置居中
+                for row in worksheet.iter_rows():
+                    for cell in row:
+                        cell.alignment = Alignment(horizontal='center', vertical='center')
             return output.getvalue()
 
         excel_data = to_excel_bytes(df_output)

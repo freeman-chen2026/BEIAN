@@ -6,7 +6,7 @@ st.set_page_config(page_title="每日通航运行情况跟踪表生成器", layo
 st.title("🛫 每日通航运行情况跟踪表生成器")
 st.markdown("上传航段计划 Excel，自动转换为跟踪表格式并导出。")
 
-# ---------- 内置注册号 -> ICAO 机型映射（已按您的最新数据更新） ----------
+# ---------- 内置注册号 -> ICAO 机型映射（按您最新提供） ----------
 DEFAULT_ICAO_MAP = {
     "B65AP": "GLF4",
     "B652R": "GLF4",
@@ -47,6 +47,25 @@ def map_usage(usage):
     else:
         return "公务飞行", "私用飞行"
 
+def format_time(value):
+    """将时间值格式化为 HH:MM:SS，若为空则返回空字符串"""
+    if pd.isna(value) or value == "":
+        return ""
+    # 如果已经是字符串且不含秒，补 :00
+    if isinstance(value, str):
+        if ":" in value:
+            parts = value.split(":")
+            if len(parts) == 2:
+                return f"{parts[0].zfill(2)}:{parts[1].zfill(2)}:00"
+            elif len(parts) == 3:
+                return f"{parts[0].zfill(2)}:{parts[1].zfill(2)}:{parts[2].zfill(2)}"
+        return value
+    # 如果是 datetime/time 对象
+    if hasattr(value, "strftime"):
+        return value.strftime("%H:%M:%S")
+    # 尝试转换为字符串
+    return str(value)
+
 # ---------- 侧边栏：映射管理 ----------
 st.sidebar.header("✈️ 注册号 → ICAO 机型映射")
 st.sidebar.markdown("若内置映射不全，请在下表补充（每行一个 `注册号 ICAO`，空格或Tab分隔）")
@@ -82,6 +101,13 @@ if uploaded_file is not None:
         df_raw = parse_uploaded_file(uploaded_file)
         st.success(f"✅ 成功读取 {len(df_raw)} 条航段记录")
 
+        # 检查必要的列是否存在，缺失时给出提示
+        required_cols = ["客户", "航班号", "飞机注册号", "用途", "出发日期", "计划出发", "预计到达", 
+                         "出发地", "到达地", "出发城市", "到达城市", "航段状态"]
+        missing = [c for c in required_cols if c not in df_raw.columns]
+        if missing:
+            st.warning(f"缺少以下列（可能影响部分功能）：{missing}，请检查数据。")
+
         records = []
         for _, row in df_raw.iterrows():
             flight_date = pd.to_datetime(row["出发日期"]).strftime("%Y.%m.%d")
@@ -95,16 +121,20 @@ if uploaded_file is not None:
 
             run_type, oper_type = map_usage(row["用途"])
 
-            # 时间处理
-            start_time = str(row["计划出发"]).strip()
-            est_landing = str(row["预计到达"]).strip()
-            if hasattr(row["计划出发"], "strftime"):
-                start_time = row["计划出发"].strftime("%H:%M")
-            if hasattr(row["预计到达"], "strftime"):
-                est_landing = row["预计到达"].strftime("%H:%M")
+            # 时间处理（全部转为 HH:MM:SS）
+            start_time = format_time(row.get("计划出发", ""))
+            est_landing = format_time(row.get("预计到达", ""))
+            
+            # 实际落地时间：从“实际到达”列获取
+            actual_end = format_time(row.get("实际到达", "")) if "实际到达" in df_raw.columns else ""
+            
+            # 判断是否已落地：航段状态为“已执飞”或“已完成”
+            status = str(row.get("航段状态", "")).strip()
+            is_landed = "是" if status in ["已执飞", "已完成"] else "否"
+            # 若已落地但无实际到达时间，保留空（但用户一般会提供）
 
             reg = str(row["飞机注册号"]).strip().upper()
-            icao_type = icao_map.get(reg, "")  # 若未映射则为空
+            icao_type = icao_map.get(reg, "")
 
             record = {
                 "深圳监管局": "深圳局",
@@ -118,8 +148,8 @@ if uploaded_file is not None:
                 "是否获得飞行计划部门批准飞行": "是",
                 "飞行开始时间": start_time,
                 "飞行预计落地时间": est_landing,
-                "是否已落地": "否",
-                "飞行实际结束时间": "",
+                "是否已落地": is_landed,
+                "飞行实际结束时间": actual_end if is_landed == "是" else "",
                 "飞行地点（航线）": route,
                 "选择允许的运行种类": "公务航空运行",
                 "监管局是否电话跟踪该飞行动态": ""
@@ -156,6 +186,6 @@ if uploaded_file is not None:
 
     except Exception as e:
         st.error(f"❌ 处理文件时出错：{e}")
-        st.info("请确认 Excel 包含列：客户、航班号、飞机注册号、用途、出发日期、计划出发、预计到达、出发地、到达地、出发城市、到达城市")
+        st.info("请确认 Excel 包含列：客户、航班号、飞机注册号、用途、出发日期、计划出发、预计到达、出发地、到达地、出发城市、到达城市、航段状态、实际到达（可选）")
 else:
     st.info("👆 请上传航段数据导出 Excel 文件")

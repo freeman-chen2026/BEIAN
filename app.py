@@ -1,14 +1,11 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
-from openpyxl import load_workbook
-from openpyxl.styles import Alignment, PatternFill, Font, Border
-from openpyxl.utils import get_column_letter
-from copy import copy
+from openpyxl.styles import Alignment
 
 st.set_page_config(page_title="每日通航运行情况跟踪表生成器", layout="wide")
 st.title("🛫 每日通航运行情况跟踪表生成器")
-st.markdown("上传航段计划 Excel 和带格式的模板，自动生成备案表格。")
+st.markdown("上传航段计划 Excel，自动生成备案表格（无需模板）。")
 
 # ---------- 注册号 -> ICAO 机型映射 ----------
 DEFAULT_ICAO_MAP = {
@@ -24,7 +21,7 @@ DEFAULT_ICAO_MAP = {
     "B8292": "GLF5",
 }
 
-# ---------- 解析航段数据 ----------
+# ---------- 辅助函数 ----------
 def find_header_row(df_raw):
     keywords = ["客户", "航班号", "飞机注册号", "出发日期"]
     for idx, row in df_raw.iterrows():
@@ -88,89 +85,44 @@ for k, v in DEFAULT_ICAO_MAP.items():
     if k not in icao_map:
         icao_map[k] = v
 
-# ---------- 初始化 session_state 存储模板 ----------
-if "template_loaded" not in st.session_state:
-    st.session_state.template_loaded = False
-    st.session_state.template_wb = None
-    st.session_state.template_ws = None
-    st.session_state.template_style_cache = None
-
-# ---------- 模板加载函数 ----------
-def load_template(uploaded_file):
-    """加载模板并提取样式，缓存到 session_state"""
-    template_io = BytesIO(uploaded_file.read())
-    wb = load_workbook(template_io)
-    ws = wb.active
-    # 提取表头行（假设第2行）样式，用于复制到新行
-    header_row = 2
-    style_cache = {}
-    for col in range(1, 17):  # A-P
-        cell = ws.cell(row=header_row, column=col)
-        style_cache[col] = {
-            "font": copy(cell.font),
-            "fill": copy(cell.fill),
-            "border": copy(cell.border),
-            "alignment": copy(cell.alignment),
-            "number_format": cell.number_format
-        }
-    # 保存到 session_state
-    st.session_state.template_loaded = True
-    st.session_state.template_wb = wb
-    st.session_state.template_ws = ws
-    st.session_state.template_style_cache = style_cache
-    st.session_state.template_header_row = header_row
-    return True
-
 # ---------- 主界面 ----------
-st.subheader("📂 上传文件")
+uploaded_file = st.file_uploader("上传航段数据导出 Excel", type=["xlsx"])
 
-# 如果模板尚未加载，显示上传模板的按钮
-if not st.session_state.template_loaded:
-    template_file = st.file_uploader("首次使用请上传带格式的模板 Excel（后续无需再传）", type=["xlsx"], key="template_upload")
-    if template_file:
-        try:
-            load_template(template_file)
-            st.success("✅ 模板已加载并缓存，现在可以上传数据文件了。")
-        except Exception as e:
-            st.error(f"模板加载失败：{e}")
-    else:
-        st.info("请先上传模板文件。")
-        st.stop()
-else:
-    st.success("✅ 模板已加载（无需重复上传）")
-
-# 上传数据文件
-data_file = st.file_uploader("上传航段数据导出 Excel（如：航段数据导出 (40).xlsx）", type=["xlsx"], key="data_upload")
-
-if data_file and st.session_state.template_loaded:
+if uploaded_file is not None:
     try:
-        # 1. 读取数据
-        df_raw = parse_uploaded_file(data_file)
+        df_raw = parse_uploaded_file(uploaded_file)
         st.success(f"✅ 成功读取 {len(df_raw)} 条航段记录")
 
-        # 2. 从 session_state 获取模板工作簿和工作表
-        wb = st.session_state.template_wb
-        ws = st.session_state.template_ws
-        style_cache = st.session_state.template_style_cache
-        header_row = st.session_state.template_header_row
+        # 检查必要列
+        required_cols = ["客户", "航班号", "飞机注册号", "用途", "出发日期", "计划出发", "预计到达",
+                         "出发地", "到达地", "出发城市", "到达城市", "航段状态"]
+        missing = [c for c in required_cols if c not in df_raw.columns]
+        if missing:
+            st.warning(f"缺少以下列（可能影响部分功能）：{missing}，请检查数据。")
 
-        # 3. 清空所有旧数据行（从第3行开始）
-        max_row = ws.max_row
-        if max_row >= 3:
-            ws.delete_rows(3, max_row - 2)  # 删除第3行到最后
+        # 检查是否有“实际出发”列
+        has_actual_depart = "实际出发" in df_raw.columns
+        if not has_actual_depart:
+            st.info("注意：Excel 中没有'实际出发'列，将使用'计划出发'作为飞行开始时间。")
 
-        # 4. 准备数据
         records = []
         for _, row in df_raw.iterrows():
             flight_date = pd.to_datetime(row["出发日期"]).strftime("%Y-%m-%d 00:00:00")
             dep_city = str(row.get("出发城市", "")).strip()
             arr_city = str(row.get("到达城市", "")).strip()
-            if dep_city and arr_city:
-                route = f"{dep_city}-{arr_city}"
-            else:
-                route = f"{row['出发地']}-{row['到达地']}"
+            route = f"{dep_city}-{arr_city}" if dep_city and arr_city else f"{row['出发地']}-{row['到达地']}"
             run_type, oper_type = map_usage(row["用途"])
-            start_time = format_time(row.get("计划出发", ""))
+
+            # ---------- 飞行开始时间：优先实际出发，若无则用计划出发 ----------
+            if has_actual_depart:
+                actual_depart = format_time(row.get("实际出发", ""))
+                if actual_depart:
+                    start_time = actual_depart
+                else:
+                    start_time = format_time(row.get("计划出发", ""))
+            else:
+                start_time = format_time(row.get("计划出发", ""))
+
             est_landing = format_time(row.get("预计到达", ""))
             actual_end = format_time(row.get("实际到达", "")) if "实际到达" in df_raw.columns else ""
             status = str(row.get("航段状态", "")).strip()
@@ -179,86 +131,69 @@ if data_file and st.session_state.template_loaded:
             icao_type = icao_map.get(reg, "")
 
             record = {
-                "A": "深圳局",
-                "B": "天成商务航空有限公司",
-                "C": flight_date,
-                "D": run_type,
-                "E": oper_type,
-                "F": icao_type,
-                "G": reg,
-                "H": "是",
-                "I": "是",
-                "J": start_time,
-                "K": est_landing,
-                "L": is_landed,
-                "M": actual_end if is_landed == "是" else "",
-                "N": route,
-                "O": "3.公务航空运行",
-                "P": ""
+                "所属监管局": "深圳局",
+                "运行人标准名称": "天成商务航空有限公司",
+                "飞行活动的日期": flight_date,
+                "当日飞行的运行种类": run_type,
+                "当日飞行的经营种类": oper_type,
+                "航空器型号": icao_type,
+                "航空器注册号": reg,
+                "是否向监控中心完成计划备案": "是",
+                "是否获得飞行计划部门批准飞行": "是",
+                "飞行开始时间": start_time,
+                "飞行预计落地时间": est_landing,
+                "是否已落地": is_landed,
+                "飞行实际结束时间": actual_end if is_landed == "是" else "",
+                "飞行地点（航线）": route,
+                "选择允许的运行种类": "3.公务航空运行",
+                "监管局是否电话跟踪该飞行动态": ""
             }
             records.append(record)
 
-        # 按日期+开始时间排序
-        records = sorted(records, key=lambda x: (x["C"], x["J"]))
+        df_output = pd.DataFrame(records)
+        # 固定列顺序
+        column_order = [
+            "所属监管局", "运行人标准名称", "飞行活动的日期", "当日飞行的运行种类", "当日飞行的经营种类",
+            "航空器型号", "航空器注册号", "是否向监控中心完成计划备案", "是否获得飞行计划部门批准飞行",
+            "飞行开始时间", "飞行预计落地时间", "是否已落地", "飞行实际结束时间", "飞行地点（航线）",
+            "选择允许的运行种类", "监管局是否电话跟踪该飞行动态"
+        ]
+        df_output = df_output[column_order]
+        # 排序
+        df_output = df_output.sort_values(["飞行活动的日期", "飞行开始时间"], na_position='first').reset_index(drop=True)
 
-        # 5. 写入数据行，复制样式
-        for i, rec in enumerate(records):
-            row_num = 3 + i
-            for col_letter in "ABCDEFGHIJKLMNOP":
-                col_idx = ws[col_letter + "1"].column
-                cell = ws.cell(row=row_num, column=col_idx)
-                cell.value = rec[col_letter]
-                # 应用样式（从表头行复制）
-                style = style_cache[col_idx]
-                cell.font = style["font"]
-                cell.fill = style["fill"]
-                cell.border = style["border"]
-                cell.alignment = style["alignment"]
-                cell.number_format = style["number_format"]
+        st.subheader("📋 转换后的跟踪表（预览）")
+        st.dataframe(df_output, use_container_width=True)
 
-        # 6. 保存到内存
-        output = BytesIO()
-        wb.save(output)
-        output.seek(0)
+        # 导出 Excel（所有单元格居中）
+        def to_excel_bytes(df):
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, sheet_name="Sheet1", index=False)
+                workbook = writer.book
+                worksheet = writer.sheets["Sheet1"]
+                for row in worksheet.iter_rows():
+                    for cell in row:
+                        cell.alignment = Alignment(horizontal='center', vertical='center')
+            return output.getvalue()
 
-        # 预览
-        st.subheader("📋 预览（前5行数据）")
-        preview_df = pd.DataFrame(records)
-        if not preview_df.empty:
-            preview_df = preview_df.rename(columns={
-                "A": "所属监管局",
-                "B": "运行人标准名称",
-                "C": "飞行活动的日期",
-                "D": "当日飞行的运行种类",
-                "E": "当日飞行的经营种类",
-                "F": "航空器型号",
-                "G": "航空器注册号",
-                "H": "是否向监控中心完成计划备案",
-                "I": "是否获得飞行计划部门批准飞行",
-                "J": "飞行开始时间",
-                "K": "飞行预计落地时间",
-                "L": "是否已落地",
-                "M": "飞行实际结束时间",
-                "N": "飞行地点（航线）",
-                "O": "选择允许的运行种类",
-                "P": "监管局是否电话跟踪该飞行动态"
-            })
-            st.dataframe(preview_df, use_container_width=True)
-        else:
-            st.warning("无数据可预览")
-
+        excel_data = to_excel_bytes(df_output)
         st.download_button(
-            label="⬇️ 下载带格式的 Excel 文件",
-            data=output,
-            file_name="每日通航运行情况跟踪表_生成.xlsx",
+            label="⬇️ 下载 Excel 文件（.xlsx）",
+            data=excel_data,
+            file_name="每日通航运行情况跟踪表.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
+        st.download_button(
+            label="⬇️ 下载 CSV 文件",
+            data=df_output.to_csv(index=False, encoding='utf-8-sig'),
+            file_name="每日通航运行情况跟踪表.csv",
+            mime="text/csv"
+        )
+
     except Exception as e:
-        st.error(f"❌ 处理失败：{e}")
-        st.exception(e)
+        st.error(f"❌ 处理文件时出错：{e}")
+        st.info("请确认 Excel 包含列：客户、航班号、飞机注册号、用途、出发日期、计划出发、预计到达、出发地、到达地、出发城市、到达城市、航段状态、实际出发（可选）、实际到达（可选）")
 else:
-    if not st.session_state.template_loaded:
-        st.info("请先上传模板。")
-    else:
-        st.info("请上传数据文件。")
+    st.info("👆 请上传航段数据导出 Excel 文件")

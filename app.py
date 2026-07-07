@@ -100,20 +100,22 @@ if uploaded_file is not None:
         if missing:
             st.warning(f"缺少以下列（可能影响部分功能）：{missing}，请检查数据。")
 
-        # 检查是否有“实际出发”列
         has_actual_depart = "实际出发" in df_raw.columns
         if not has_actual_depart:
             st.info("注意：Excel 中没有'实际出发'列，将使用'计划出发'作为飞行开始时间。")
 
         records = []
         for _, row in df_raw.iterrows():
-            flight_date = pd.to_datetime(row["出发日期"]).strftime("%Y-%m-%d 00:00:00")
+            # 日期格式：YYYY/M/D（无前导零）
+            dt = pd.to_datetime(row["出发日期"])
+            flight_date = f"{dt.year}/{dt.month}/{dt.day}"
+
             dep_city = str(row.get("出发城市", "")).strip()
             arr_city = str(row.get("到达城市", "")).strip()
             route = f"{dep_city}-{arr_city}" if dep_city and arr_city else f"{row['出发地']}-{row['到达地']}"
             run_type, oper_type = map_usage(row["用途"])
 
-            # ---------- 飞行开始时间：优先实际出发，若无则用计划出发 ----------
+            # 飞行开始时间：优先实际出发，若无则用计划出发
             if has_actual_depart:
                 actual_depart = format_time(row.get("实际出发", ""))
                 if actual_depart:
@@ -151,7 +153,6 @@ if uploaded_file is not None:
             records.append(record)
 
         df_output = pd.DataFrame(records)
-        # 固定列顺序
         column_order = [
             "所属监管局", "运行人标准名称", "飞行活动的日期", "当日飞行的运行种类", "当日飞行的经营种类",
             "航空器型号", "航空器注册号", "是否向监控中心完成计划备案", "是否获得飞行计划部门批准飞行",
@@ -159,13 +160,11 @@ if uploaded_file is not None:
             "选择允许的运行种类", "监管局是否电话跟踪该飞行动态"
         ]
         df_output = df_output[column_order]
-        # 排序
         df_output = df_output.sort_values(["飞行活动的日期", "飞行开始时间"], na_position='first').reset_index(drop=True)
 
         st.subheader("📋 转换后的跟踪表（预览）")
         st.dataframe(df_output, use_container_width=True)
 
-        # 导出 Excel（所有单元格居中）
         def to_excel_bytes(df):
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:

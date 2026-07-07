@@ -52,7 +52,6 @@ def format_time(value):
     """将时间值格式化为 HH:MM:SS，若为空则返回空字符串"""
     if pd.isna(value) or value == "" or value is None:
         return ""
-    # 如果已经是字符串且不含秒，补 :00
     if isinstance(value, str):
         if ":" in value:
             parts = value.split(":")
@@ -61,10 +60,8 @@ def format_time(value):
             elif len(parts) == 3:
                 return f"{parts[0].zfill(2)}:{parts[1].zfill(2)}:{parts[2].zfill(2)}"
         return value
-    # 如果是 datetime/time 对象
     if hasattr(value, "strftime"):
         return value.strftime("%H:%M:%S")
-    # 尝试转换为字符串
     return str(value)
 
 # ---------- 侧边栏：映射管理 ----------
@@ -89,7 +86,6 @@ def parse_mapping(text):
     return map_dict
 
 icao_map = parse_mapping(user_mapping_text)
-# 合并内置（用户输入优先）
 for k, v in DEFAULT_ICAO_MAP.items():
     if k not in icao_map:
         icao_map[k] = v
@@ -102,7 +98,6 @@ if uploaded_file is not None:
         df_raw = parse_uploaded_file(uploaded_file)
         st.success(f"✅ 成功读取 {len(df_raw)} 条航段记录")
 
-        # 检查必要的列是否存在，缺失时给出提示
         required_cols = ["客户", "航班号", "飞机注册号", "用途", "出发日期", "计划出发", "预计到达", 
                          "出发地", "到达地", "出发城市", "到达城市", "航段状态"]
         missing = [c for c in required_cols if c not in df_raw.columns]
@@ -111,8 +106,9 @@ if uploaded_file is not None:
 
         records = []
         for _, row in df_raw.iterrows():
-            flight_date = pd.to_datetime(row["出发日期"]).strftime("%Y.%m.%d")
-            # 航线 = 出发城市 - 到达城市（若城市名为空则回退四字码）
+            # 日期格式：YYYY-MM-DD 00:00:00
+            flight_date = pd.to_datetime(row["出发日期"]).strftime("%Y-%m-%d 00:00:00")
+            
             dep_city = str(row.get("出发城市", "")).strip()
             arr_city = str(row.get("到达城市", "")).strip()
             if dep_city and arr_city:
@@ -122,23 +118,18 @@ if uploaded_file is not None:
 
             run_type, oper_type = map_usage(row["用途"])
 
-            # 时间处理（全部转为 HH:MM:SS）
             start_time = format_time(row.get("计划出发", ""))
             est_landing = format_time(row.get("预计到达", ""))
-            
-            # 实际落地时间：从“实际到达”列获取
             actual_end = format_time(row.get("实际到达", "")) if "实际到达" in df_raw.columns else ""
             
-            # 判断是否已落地：航段状态为“已执飞”或“已完成”
             status = str(row.get("航段状态", "")).strip()
             is_landed = "是" if status in ["已执飞", "已完成"] else "否"
-            # 若已落地但无实际到达时间，保留空（但用户一般会提供）
 
             reg = str(row["飞机注册号"]).strip().upper()
             icao_type = icao_map.get(reg, "")
 
             record = {
-                "深圳监管局": "深圳局",
+                "所属监管局": "深圳局",
                 "运行人标准名称": "天成商务航空有限公司",
                 "飞行活动的日期": flight_date,
                 "当日飞行的运行种类": run_type,
@@ -152,25 +143,32 @@ if uploaded_file is not None:
                 "是否已落地": is_landed,
                 "飞行实际结束时间": actual_end if is_landed == "是" else "",
                 "飞行地点（航线）": route,
-                "选择允许的运行种类": "公务航空运行",
+                "选择允许的运行种类": "3.公务航空运行",   # 按新模板
                 "监管局是否电话跟踪该飞行动态": ""
             }
             records.append(record)
 
+        # 按模板顺序排列列
+        column_order = [
+            "所属监管局", "运行人标准名称", "飞行活动的日期", "当日飞行的运行种类", "当日飞行的经营种类",
+            "航空器型号", "航空器注册号", "是否向监控中心完成计划备案", "是否获得飞行计划部门批准飞行",
+            "飞行开始时间", "飞行预计落地时间", "是否已落地", "飞行实际结束时间", "飞行地点（航线）",
+            "选择允许的运行种类", "监管局是否电话跟踪该飞行动态"
+        ]
         df_output = pd.DataFrame(records)
+        df_output = df_output[column_order]  # 确保列顺序
         df_output = df_output.sort_values(["飞行活动的日期", "飞行开始时间"]).reset_index(drop=True)
 
         st.subheader("📋 转换后的跟踪表（预览）")
         st.dataframe(df_output, use_container_width=True)
 
-        # ---------- 导出 Excel（设置所有单元格居中） ----------
+        # 导出 Excel（所有单元格居中）
         def to_excel_bytes(df):
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df.to_excel(writer, sheet_name="Sheet1", index=False)
                 workbook = writer.book
                 worksheet = writer.sheets["Sheet1"]
-                # 对每个单元格设置居中
                 for row in worksheet.iter_rows():
                     for cell in row:
                         cell.alignment = Alignment(horizontal='center', vertical='center')

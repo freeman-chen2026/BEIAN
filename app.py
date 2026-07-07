@@ -88,57 +88,78 @@ for k, v in DEFAULT_ICAO_MAP.items():
     if k not in icao_map:
         icao_map[k] = v
 
+# ---------- 初始化 session_state 存储模板 ----------
+if "template_loaded" not in st.session_state:
+    st.session_state.template_loaded = False
+    st.session_state.template_wb = None
+    st.session_state.template_ws = None
+    st.session_state.template_style_cache = None
+
+# ---------- 模板加载函数 ----------
+def load_template(uploaded_file):
+    """加载模板并提取样式，缓存到 session_state"""
+    template_io = BytesIO(uploaded_file.read())
+    wb = load_workbook(template_io)
+    ws = wb.active
+    # 提取表头行（假设第2行）样式，用于复制到新行
+    header_row = 2
+    style_cache = {}
+    for col in range(1, 17):  # A-P
+        cell = ws.cell(row=header_row, column=col)
+        style_cache[col] = {
+            "font": copy(cell.font),
+            "fill": copy(cell.fill),
+            "border": copy(cell.border),
+            "alignment": copy(cell.alignment),
+            "number_format": cell.number_format
+        }
+    # 保存到 session_state
+    st.session_state.template_loaded = True
+    st.session_state.template_wb = wb
+    st.session_state.template_ws = ws
+    st.session_state.template_style_cache = style_cache
+    st.session_state.template_header_row = header_row
+    return True
+
 # ---------- 主界面 ----------
 st.subheader("📂 上传文件")
-data_file = st.file_uploader("上传航段数据导出 Excel（如：航段数据导出 (40).xlsx）", type=["xlsx"], key="data")
-template_file = st.file_uploader("上传带格式的模板 Excel（如：每日通航运行情况跟踪表（天成商务航空有限公司）20260707.xlsx）", type=["xlsx"], key="template")
 
-if data_file and template_file:
+# 如果模板尚未加载，显示上传模板的按钮
+if not st.session_state.template_loaded:
+    template_file = st.file_uploader("首次使用请上传带格式的模板 Excel（后续无需再传）", type=["xlsx"], key="template_upload")
+    if template_file:
+        try:
+            load_template(template_file)
+            st.success("✅ 模板已加载并缓存，现在可以上传数据文件了。")
+        except Exception as e:
+            st.error(f"模板加载失败：{e}")
+    else:
+        st.info("请先上传模板文件。")
+        st.stop()
+else:
+    st.success("✅ 模板已加载（无需重复上传）")
+
+# 上传数据文件
+data_file = st.file_uploader("上传航段数据导出 Excel（如：航段数据导出 (40).xlsx）", type=["xlsx"], key="data_upload")
+
+if data_file and st.session_state.template_loaded:
     try:
         # 1. 读取数据
         df_raw = parse_uploaded_file(data_file)
         st.success(f"✅ 成功读取 {len(df_raw)} 条航段记录")
 
-        # 2. 加载模板
-        template_io = BytesIO(template_file.read())
-        wb = load_workbook(template_io)
-        ws = wb.active
+        # 2. 从 session_state 获取模板工作簿和工作表
+        wb = st.session_state.template_wb
+        ws = st.session_state.template_ws
+        style_cache = st.session_state.template_style_cache
+        header_row = st.session_state.template_header_row
 
-        # 3. 确定表头行（假设第2行是表头，数据从第3行开始）
-        header_row = 2
-        data_start_row = 3
-
-        # 4. 清空所有旧数据行（从 data_start_row 到最后）
-        # 但保留可能的合并单元格？我们删除行
-        # 先获取最大行
+        # 3. 清空所有旧数据行（从第3行开始）
         max_row = ws.max_row
-        if max_row >= data_start_row:
-            ws.delete_rows(data_start_row, max_row - data_start_row + 1)
+        if max_row >= 3:
+            ws.delete_rows(3, max_row - 2)  # 删除第3行到最后
 
-        # 5. 准备新数据（按模板列顺序）
-        # 模板列顺序（从A到P）：
-        col_map = {
-            "A": "所属监管局",
-            "B": "运行人标准名称",
-            "C": "飞行活动的日期",
-            "D": "当日飞行的运行种类",
-            "E": "当日飞行的经营种类",
-            "F": "航空器型号",
-            "G": "航空器注册号",
-            "H": "是否向监控中心完成计划备案",
-            "I": "是否获得飞行计划部门批准飞行",
-            "J": "飞行开始时间",
-            "K": "飞行预计落地时间",
-            "L": "是否已落地",
-            "M": "飞行实际结束时间",
-            "N": "飞行地点（航线）",
-            "O": "选择允许的运行种类",
-            "P": "监管局是否电话跟踪该飞行动态"
-        }
-        # 反向映射：列名 -> 列字母
-        col_letter = {v: k for k, v in col_map.items()}
-
-        # 读取数据并生成记录
+        # 4. 准备数据
         records = []
         for _, row in df_raw.iterrows():
             flight_date = pd.to_datetime(row["出发日期"]).strftime("%Y-%m-%d 00:00:00")
@@ -158,67 +179,73 @@ if data_file and template_file:
             icao_type = icao_map.get(reg, "")
 
             record = {
-                "所属监管局": "深圳局",
-                "运行人标准名称": "天成商务航空有限公司",
-                "飞行活动的日期": flight_date,
-                "当日飞行的运行种类": run_type,
-                "当日飞行的经营种类": oper_type,
-                "航空器型号": icao_type,
-                "航空器注册号": reg,
-                "是否向监控中心完成计划备案": "是",
-                "是否获得飞行计划部门批准飞行": "是",
-                "飞行开始时间": start_time,
-                "飞行预计落地时间": est_landing,
-                "是否已落地": is_landed,
-                "飞行实际结束时间": actual_end if is_landed == "是" else "",
-                "飞行地点（航线）": route,
-                "选择允许的运行种类": "3.公务航空运行",
-                "监管局是否电话跟踪该飞行动态": ""
+                "A": "深圳局",
+                "B": "天成商务航空有限公司",
+                "C": flight_date,
+                "D": run_type,
+                "E": oper_type,
+                "F": icao_type,
+                "G": reg,
+                "H": "是",
+                "I": "是",
+                "J": start_time,
+                "K": est_landing,
+                "L": is_landed,
+                "M": actual_end if is_landed == "是" else "",
+                "N": route,
+                "O": "3.公务航空运行",
+                "P": ""
             }
             records.append(record)
 
-        # 6. 按日期和开始时间排序
-        records = sorted(records, key=lambda x: (x["飞行活动的日期"], x["飞行开始时间"]))
+        # 按日期+开始时间排序
+        records = sorted(records, key=lambda x: (x["C"], x["J"]))
 
-        # 7. 将数据写入模板，并复制样式（从表头行复制样式）
-        # 获取表头行所有单元格的样式（以便应用到新行）
-        header_cells = {}
-        for col in range(1, 17):  # A-P
-            cell = ws.cell(row=header_row, column=col)
-            header_cells[col] = {
-                "font": copy(cell.font),
-                "fill": copy(cell.fill),
-                "border": copy(cell.border),
-                "alignment": copy(cell.alignment),
-                "number_format": cell.number_format
-            }
-
-        # 写入数据行
+        # 5. 写入数据行，复制样式
         for i, rec in enumerate(records):
-            row_num = data_start_row + i
-            for col_letter, col_name in col_map.items():
-                col_idx = ws[col_letter + "1"].column  # 获取列号
-                value = rec.get(col_name, "")
+            row_num = 3 + i
+            for col_letter in "ABCDEFGHIJKLMNOP":
+                col_idx = ws[col_letter + "1"].column
                 cell = ws.cell(row=row_num, column=col_idx)
-                cell.value = value
-                # 复制表头行的样式
-                style = header_cells[col_idx]
+                cell.value = rec[col_letter]
+                # 应用样式（从表头行复制）
+                style = style_cache[col_idx]
                 cell.font = style["font"]
                 cell.fill = style["fill"]
                 cell.border = style["border"]
                 cell.alignment = style["alignment"]
                 cell.number_format = style["number_format"]
 
-        # 8. 保存到内存
+        # 6. 保存到内存
         output = BytesIO()
         wb.save(output)
         output.seek(0)
 
-        st.subheader("📋 预览（前5行）")
-        # 显示预览：读取生成的临时文件用pandas预览，但格式可能丢失，我们直接显示DataFrame
-        # 为了预览，从records构建DataFrame
+        # 预览
+        st.subheader("📋 预览（前5行数据）")
         preview_df = pd.DataFrame(records)
-        st.dataframe(preview_df, use_container_width=True)
+        if not preview_df.empty:
+            preview_df = preview_df.rename(columns={
+                "A": "所属监管局",
+                "B": "运行人标准名称",
+                "C": "飞行活动的日期",
+                "D": "当日飞行的运行种类",
+                "E": "当日飞行的经营种类",
+                "F": "航空器型号",
+                "G": "航空器注册号",
+                "H": "是否向监控中心完成计划备案",
+                "I": "是否获得飞行计划部门批准飞行",
+                "J": "飞行开始时间",
+                "K": "飞行预计落地时间",
+                "L": "是否已落地",
+                "M": "飞行实际结束时间",
+                "N": "飞行地点（航线）",
+                "O": "选择允许的运行种类",
+                "P": "监管局是否电话跟踪该飞行动态"
+            })
+            st.dataframe(preview_df, use_container_width=True)
+        else:
+            st.warning("无数据可预览")
 
         st.download_button(
             label="⬇️ 下载带格式的 Excel 文件",
@@ -229,6 +256,9 @@ if data_file and template_file:
 
     except Exception as e:
         st.error(f"❌ 处理失败：{e}")
-        st.info("请确保模板文件包含表头（第2行），且列标题与要求一致。")
+        st.exception(e)
 else:
-    st.info("请上传 **数据源** 和 **模板** 两个文件。")
+    if not st.session_state.template_loaded:
+        st.info("请先上传模板。")
+    else:
+        st.info("请上传数据文件。")

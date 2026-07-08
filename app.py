@@ -1,10 +1,10 @@
 import streamlit as st
 import pandas as pd
-from io import StringIO
+from io import StringIO, BytesIO
 
 st.set_page_config(page_title="每日通航运行情况跟踪表生成器", layout="wide")
 st.title("🛫 每日通航运行情况跟踪表生成器")
-st.markdown("上传航段数据 Excel，生成可复制粘贴的表格文本。")
+st.markdown("上传航段数据 Excel，生成可复制粘贴的表格文本，或直接下载 CSV。")
 
 # ---------- 注册号 -> ICAO 机型映射 ----------
 DEFAULT_ICAO_MAP = {
@@ -92,22 +92,14 @@ if uploaded_file is not None:
         df_raw = parse_uploaded_file(uploaded_file)
         st.success(f"✅ 成功读取 {len(df_raw)} 条航段记录")
 
-        # 检查必要列
-        required_cols = ["客户", "航班号", "飞机注册号", "用途", "出发日期", "计划出发", "预计到达",
-                         "出发地", "到达地", "出发城市", "到达城市", "航段状态"]
-        missing = [c for c in required_cols if c not in df_raw.columns]
-        if missing:
-            st.warning(f"缺少以下列（可能影响部分功能）：{missing}，请检查数据。")
-
         has_actual_depart = "实际出发" in df_raw.columns
         if not has_actual_depart:
             st.info("注意：Excel 中没有'实际出发'列，将使用'计划出发'作为飞行开始时间。")
 
-        # 生成数据行（按原始顺序）
         records = []
         for _, row in df_raw.iterrows():
             dt = pd.to_datetime(row["出发日期"])
-            flight_date = f"{dt.year}/{dt.month}/{dt.day}"  # 2026/7/8
+            flight_date = f"{dt.year}/{dt.month}/{dt.day}"
 
             dep_city = str(row.get("出发城市", "")).strip()
             arr_city = str(row.get("到达城市", "")).strip()
@@ -147,42 +139,33 @@ if uploaded_file is not None:
             }
             records.append(record)
 
-        # ---------- 生成纯文本表格（制表符分隔） ----------
-        # 定义列标题（与模板一致）
-        headers = [
-            "所属监管局", "运行人标准名称", "飞行活动的日期", "当日飞行的运行种类", "当日飞行的经营种类",
-            "航空器型号", "航空器注册号", "是否向监控中心完成计划备案", "是否获得飞行计划部门批准飞行",
-            "飞行开始时间", "飞行预计落地时间", "是否已落地", "飞行实际结束时间", "飞行地点（航线）",
-            "选择允许的运行种类", "监管局是否电话跟踪该飞行动态"
-        ]
-        # 构建 TSV 字符串
-        tsv_lines = []
-        tsv_lines.append("\t".join(headers))
-        for rec in records:
-            row = [str(rec.get(h, "")) for h in headers]
-            tsv_lines.append("\t".join(row))
-        tsv_text = "\n".join(tsv_lines)
-
-        # ---------- 展示预览（DataFrame） ----------
         df_output = pd.DataFrame(records)
+
+        # ---------- 预览 ----------
         st.subheader("📋 数据预览（按原始顺序）")
         st.dataframe(df_output, use_container_width=True)
 
-        # ---------- 可复制文本区域 ----------
-        st.subheader("📄 复制以下文本，粘贴到 Excel 中（自动分列）")
+        # ---------- 生成制表符文本 ----------
+        headers = list(df_output.columns)
+        tsv_lines = ["\t".join(headers)]
+        for _, row in df_output.iterrows():
+            tsv_lines.append("\t".join([str(v) for v in row]))
+        tsv_text = "\n".join(tsv_lines)
+
+        st.subheader("📄 复制以下文本（制表符分隔）")
         st.text_area(
-            label="全选 Ctrl+A 后复制 Ctrl+C",
+            label="全选复制（Ctrl+A，Ctrl+C）",
             value=tsv_text,
-            height=300,
+            height=250,
             key="tsv_area"
         )
-        st.caption("💡 提示：复制后粘贴到 Excel，数据会自动按列分开（若未分开，可使用“数据”->“分列”功能，分隔符选“制表符”）。")
+        st.caption("💡 粘贴到 Excel 后，若未分列，请使用“数据”->“分列”，分隔符选“制表符”。")
 
-        # ---------- CSV 下载（备用） ----------
-        csv_data = df_output.to_csv(index=False, encoding='utf-8-sig')
+        # ---------- 下载 CSV（UTF-8-BOM） ----------
+        csv_bytes = df_output.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
         st.download_button(
-            label="⬇️ 下载 CSV 文件（可直接用 Excel 打开）",
-            data=csv_data,
+            label="⬇️ 下载 CSV 文件（推荐，用 Excel 打开即可）",
+            data=csv_bytes,
             file_name="每日通航运行情况跟踪表.csv",
             mime="text/csv"
         )

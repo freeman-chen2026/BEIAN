@@ -1,12 +1,9 @@
 import streamlit as st
 import pandas as pd
-from io import BytesIO
-from openpyxl import load_workbook
-from copy import copy
 
-st.set_page_config(page_title="每日通航运行情况跟踪表生成器", layout="wide")
-st.title("🛫 每日通航运行情况跟踪表生成器")
-st.markdown("上传模板和数据，自动替换数据，格式完全保留。")
+st.set_page_config(page_title="航段数据转文本表格", layout="wide")
+st.title("🛫 航段数据转可粘贴文本")
+st.markdown("上传航段 Excel，生成制表符分隔的纯文本，复制后粘贴到模板中（用“选择性粘贴-数值”）。")
 
 # ---------- 注册号 -> ICAO 机型映射 ----------
 DEFAULT_ICAO_MAP = {
@@ -87,40 +84,17 @@ for k, v in DEFAULT_ICAO_MAP.items():
         icao_map[k] = v
 
 # ---------- 主界面 ----------
-st.subheader("📂 上传文件")
-template_file = st.file_uploader("上传带格式的模板 Excel（必须有表头和数据行）", type=["xlsx"], key="template")
-data_file = st.file_uploader("上传航段数据导出 Excel", type=["xlsx"], key="data")
+uploaded_file = st.file_uploader("上传航段数据导出 Excel", type=["xlsx"])
 
-if template_file and data_file:
+if uploaded_file is not None:
     try:
-        # 1. 读取数据
-        df_raw = parse_uploaded_file(data_file)
+        df_raw = parse_uploaded_file(uploaded_file)
         st.success(f"✅ 成功读取 {len(df_raw)} 条航段记录")
 
-        # 2. 加载模板
-        wb = load_workbook(template_file)
-        ws = wb.active
-
-        # 3. 查找表头行（包含“所属监管局”等）
-        header_row = None
-        for row in range(1, 10):
-            if any("所属监管局" in str(cell.value) for cell in ws[row]):
-                header_row = row
-                break
-        if header_row is None:
-            st.error("模板中未找到表头行（包含“所属监管局”），请检查模板。")
-            st.stop()
-
-        # 4. 数据起始行（表头下一行）
-        data_start_row = header_row + 1
-
-        # 5. 清空所有旧数据行（从 data_start_row 到最后）
-        max_row = ws.max_row
-        if max_row >= data_start_row:
-            ws.delete_rows(data_start_row, max_row - data_start_row + 1)
-
-        # 6. 准备新数据（按原始顺序）
         has_actual_depart = "实际出发" in df_raw.columns
+        if not has_actual_depart:
+            st.info("注意：Excel 中没有'实际出发'列，将使用'计划出发'作为飞行开始时间。")
+
         records = []
         for _, row in df_raw.iterrows():
             dt = pd.to_datetime(row["出发日期"])
@@ -164,69 +138,39 @@ if template_file and data_file:
             }
             records.append(record)
 
-        # 7. 复制模板中第一条数据行的样式（如果原本有数据）或从表头复制样式
-        # 但更好：从表头行复制样式，因为我们删除了所有数据行。
-        # 我们直接使用表头行的样式作为蓝本，但数据行通常有不同样式（如背景色），
-        # 因此我们构建一个“样式行”：
-        # 在模板中可能存在合并单元格，我们不考虑合并，只复制每个单元格样式。
-        style_row = None
-        # 尝试找到一个非空的数据行（如果模板有旧数据），否则使用表头行
-        for row in range(data_start_row, min(data_start_row + 3, ws.max_row + 1)):
-            if any(ws.cell(row=row, column=col).value for col in range(1, 17)):
-                style_row = row
-                break
-        if style_row is None:
-            style_row = header_row  # 若没找到数据行，则用表头样式
+        df_output = pd.DataFrame(records)
 
-        style_cells = {}
-        for col in range(1, 17):
-            cell = ws.cell(row=style_row, column=col)
-            style_cells[col] = {
-                "font": copy(cell.font),
-                "fill": copy(cell.fill),
-                "border": copy(cell.border),
-                "alignment": copy(cell.alignment),
-                "number_format": cell.number_format
-            }
-
-        # 8. 写入新数据并复制样式
-        for i, rec in enumerate(records):
-            row_num = data_start_row + i
-            col_names = [
-                "所属监管局", "运行人标准名称", "飞行活动的日期", "当日飞行的运行种类", "当日飞行的经营种类",
-                "航空器型号", "航空器注册号", "是否向监控中心完成计划备案", "是否获得飞行计划部门批准飞行",
-                "飞行开始时间", "飞行预计落地时间", "是否已落地", "飞行实际结束时间", "飞行地点（航线）",
-                "选择允许的运行种类", "监管局是否电话跟踪该飞行动态"
-            ]
-            for col_idx, col_name in enumerate(col_names, start=1):
-                cell = ws.cell(row=row_num, column=col_idx)
-                cell.value = rec[col_name]
-                style = style_cells[col_idx]
-                cell.font = style["font"]
-                cell.fill = style["fill"]
-                cell.border = style["border"]
-                cell.alignment = style["alignment"]
-                cell.number_format = style["number_format"]
-
-        # 9. 保存
-        output = BytesIO()
-        wb.save(output)
-        output.seek(0)
-
-        # 预览
-        preview_df = pd.DataFrame(records)
+        # ---------- 预览 ----------
         st.subheader("📋 数据预览（按原始顺序）")
-        st.dataframe(preview_df, use_container_width=True)
+        st.dataframe(df_output, use_container_width=True)
 
+        # ---------- 生成制表符分隔的纯文本 ----------
+        headers = list(df_output.columns)
+        tsv_lines = ["\t".join(headers)]
+        for _, row in df_output.iterrows():
+            tsv_lines.append("\t".join([str(v) for v in row]))
+        tsv_text = "\n".join(tsv_lines)
+
+        st.subheader("📄 复制以下纯文本（制表符分隔）")
+        st.text_area(
+            label="全选复制（Ctrl+A，Ctrl+C）",
+            value=tsv_text,
+            height=300,
+            key="tsv_area"
+        )
+        st.caption("💡 复制后，在模板 Excel 中右键 → 选择性粘贴 → 数值，即可只填入数据，保留模板格式。")
+
+        # ---------- 下载 CSV（UTF-8-BOM） ----------
+        csv_bytes = df_output.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
         st.download_button(
-            label="⬇️ 下载带格式的 Excel 文件",
-            data=output,
-            file_name="每日通航运行情况跟踪表_生成.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            label="⬇️ 下载 CSV 文件（用 Excel 打开后全选复制，同样可选择性粘贴）",
+            data=csv_bytes,
+            file_name="航段数据_纯文本.csv",
+            mime="text/csv"
         )
 
     except Exception as e:
         st.error(f"❌ 处理失败：{e}")
         st.exception(e)
 else:
-    st.info("👆 请同时上传模板文件和航段数据文件。")
+    st.info("👆 请上传航段数据 Excel 文件。")

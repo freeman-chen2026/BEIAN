@@ -94,7 +94,7 @@ if "template_ws" not in st.session_state:
 if "template_style_cache" not in st.session_state:
     st.session_state.template_style_cache = None
 if "template_header_row" not in st.session_state:
-    st.session_state.template_header_row = 2  # 假设表头在第2行
+    st.session_state.template_header_row = 2
 if "template_loaded" not in st.session_state:
     st.session_state.template_loaded = False
 
@@ -107,13 +107,11 @@ template_file = st.file_uploader(
 )
 if template_file:
     try:
-        # 加载模板
         template_io = BytesIO(template_file.read())
         wb = load_workbook(template_io)
         ws = wb.active
         
-        # 提取样式缓存（从表头行复制样式，假设第2行是表头）
-        header_row = 2
+        header_row = 2  # 假设表头在第2行（可根据模板调整）
         style_cache = {}
         for col in range(1, ws.max_column + 1):
             cell = ws.cell(row=header_row, column=col)
@@ -124,7 +122,6 @@ if template_file:
                 "alignment": copy(cell.alignment),
                 "number_format": cell.number_format
             }
-        # 保存到 session_state
         st.session_state.template_wb = wb
         st.session_state.template_ws = ws
         st.session_state.template_style_cache = style_cache
@@ -151,22 +148,20 @@ if data_file:
         df_raw = parse_uploaded_file(data_file)
         st.success(f"✅ 成功读取 {len(df_raw)} 条航段记录")
 
-        # 获取缓存的模板
         wb = st.session_state.template_wb
         ws = st.session_state.template_ws
         style_cache = st.session_state.template_style_cache
         header_row = st.session_state.template_header_row
 
-        # 清除旧数据行（从 header_row+1 开始）
+        # 清除旧数据行
         max_row = ws.max_row
         if max_row > header_row:
             ws.delete_rows(header_row + 1, max_row - header_row)
 
-        # 准备数据
+        # 准备数据（按原始顺序）
         has_actual_depart = "实际出发" in df_raw.columns
         records = []
-        for _, row in df_raw.iterrows():
-            # 日期格式：YYYY/M/D (无前导零)
+        for _, row in df_raw.iterrows():   # 保持 DataFrame 的原始行顺序
             dt = pd.to_datetime(row["出发日期"])
             flight_date = f"{dt.year}/{dt.month}/{dt.day}"
             
@@ -175,7 +170,6 @@ if data_file:
             route = f"{dep_city}-{arr_city}" if dep_city and arr_city else f"{row['出发地']}-{row['到达地']}"
             run_type, oper_type = map_usage(row["用途"])
             
-            # 飞行开始时间：优先实际出发，若空则用计划出发
             if has_actual_depart:
                 actual_depart = format_time(row.get("实际出发", ""))
                 start_time = actual_depart if actual_depart else format_time(row.get("计划出发", ""))
@@ -209,21 +203,21 @@ if data_file:
             }
             records.append(record)
 
-        # 按日期和开始时间排序
-        records = sorted(records, key=lambda x: (x["飞行活动的日期"], x["飞行开始时间"]))
+        # 不再排序，保留原始顺序
+        # records 已按 df_raw.iterrows() 的顺序生成
 
         # 写入数据并复制样式
         for i, rec in enumerate(records):
-            row_num = header_row + 1 + i  # 从表头下一行开始
-            for col_idx, col_name in enumerate([
+            row_num = header_row + 1 + i
+            col_names = [
                 "所属监管局", "运行人标准名称", "飞行活动的日期", "当日飞行的运行种类", "当日飞行的经营种类",
                 "航空器型号", "航空器注册号", "是否向监控中心完成计划备案", "是否获得飞行计划部门批准飞行",
                 "飞行开始时间", "飞行预计落地时间", "是否已落地", "飞行实际结束时间", "飞行地点（航线）",
                 "选择允许的运行种类", "监管局是否电话跟踪该飞行动态"
-            ], start=1):
+            ]
+            for col_idx, col_name in enumerate(col_names, start=1):
                 cell = ws.cell(row=row_num, column=col_idx)
                 cell.value = rec[col_name]
-                # 复制样式
                 style = style_cache[col_idx]
                 cell.font = style["font"]
                 cell.fill = style["fill"]
@@ -231,15 +225,15 @@ if data_file:
                 cell.alignment = style["alignment"]
                 cell.number_format = style["number_format"]
 
-        # 保存到内存
+        # 保存
         output = BytesIO()
         wb.save(output)
         output.seek(0)
 
-        # 预览（仅显示数据）
+        # 预览
         preview_df = pd.DataFrame(records)
-        st.subheader("📋 预览（前5行数据）")
-        st.dataframe(preview_df.head(5), use_container_width=True)
+        st.subheader("📋 预览（按原始顺序）")
+        st.dataframe(preview_df, use_container_width=True)
 
         st.download_button(
             label="⬇️ 下载带格式的 Excel 文件",

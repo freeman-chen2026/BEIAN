@@ -5,7 +5,7 @@ from openpyxl import load_workbook
 
 st.set_page_config(page_title="填入模板生成备案表", layout="wide")
 st.title("🛫 填入模板生成备案表")
-st.markdown("上传模板和数据，自动填入指定列，保留模板所有格式（O列不动）。")
+st.markdown("首次上传模板后，每日只需上传数据文件即可。")
 
 # ---------- 注册号 -> ICAO 机型映射 ----------
 DEFAULT_ICAO_MAP = {
@@ -89,12 +89,54 @@ for k, v in DEFAULT_ICAO_MAP.items():
     if k not in icao_map:
         icao_map[k] = v
 
-# ---------- 上传文件 ----------
-st.subheader("📂 上传文件")
-template_file = st.file_uploader("上传带格式的模板 Excel（含20条空行）", type=["xlsx"], key="template")
-data_file = st.file_uploader("上传航段数据导出 Excel", type=["xlsx"], key="data")
+# ---------- 初始化 session_state ----------
+if "template_wb" not in st.session_state:
+    st.session_state.template_wb = None
+if "header_row" not in st.session_state:
+    st.session_state.header_row = None
+if "data_start_row" not in st.session_state:
+    st.session_state.data_start_row = None
+if "group_rows" not in st.session_state:
+    st.session_state.group_rows = 4  # 固定每组4行
 
-if template_file and data_file:
+# ---------- 模板管理 ----------
+st.subheader("📂 模板管理")
+if st.session_state.template_wb is None:
+    st.info("首次使用请上传模板文件。")
+    template_file = st.file_uploader("上传带格式的模板 Excel（含20条空行）", type=["xlsx"], key="template_upload")
+    if template_file:
+        try:
+            wb = load_workbook(template_file)
+            ws = wb.active
+            # 查找表头行
+            header_row = None
+            for row in range(1, 5):
+                if any("所属监管局" in str(cell.value) for cell in ws[row]):
+                    header_row = row
+                    break
+            if header_row is None:
+                st.error("模板中未找到表头行，请确认模板有“所属监管局”字段。")
+                st.stop()
+            data_start_row = header_row + 1
+            st.session_state.template_wb = wb
+            st.session_state.header_row = header_row
+            st.session_state.data_start_row = data_start_row
+            st.success("✅ 模板加载成功！现在可以上传数据文件。")
+        except Exception as e:
+            st.error(f"模板加载失败：{e}")
+else:
+    st.success("✅ 模板已加载（如需更换，请点击下方按钮重置）")
+    if st.button("重新上传模板"):
+        st.session_state.template_wb = None
+        st.session_state.header_row = None
+        st.session_state.data_start_row = None
+        st.rerun()
+
+# ---------- 数据上传 ----------
+st.subheader("📊 数据上传")
+data_file = st.file_uploader("上传航段数据导出 Excel", type=["xlsx"], key="data_upload")
+
+if data_file and st.session_state.template_wb is not None:
     try:
         # 读取数据
         df_raw = parse_uploaded_file(data_file)
@@ -102,22 +144,12 @@ if template_file and data_file:
         if len(df_raw) > 20:
             st.warning(f"数据条数（{len(df_raw)}）超过模板预设的20行，多余数据将被忽略。")
 
-        # 加载模板
-        wb = load_workbook(template_file)
+        # 从 session_state 获取模板信息
+        wb = st.session_state.template_wb
         ws = wb.active
-
-        # 确定表头行（包含“所属监管局”）
-        header_row = None
-        for row in range(1, 5):
-            if any("所属监管局" in str(cell.value) for cell in ws[row]):
-                header_row = row
-                break
-        if header_row is None:
-            st.error("模板中未找到表头行，请确认模板有“所属监管局”字段。")
-            st.stop()
-
-        data_start_row = header_row + 1
-        group_rows = 4  # 每组占4行（根据模板设计）
+        header_row = st.session_state.header_row
+        data_start_row = st.session_state.data_start_row
+        group_rows = st.session_state.group_rows
 
         # 准备数据（最多20条）
         has_actual_depart = "实际出发" in df_raw.columns
@@ -159,7 +191,6 @@ if template_file and data_file:
                 "L": is_landed,
                 "M": actual_end if is_landed == "是" else "",
                 "N": route,
-                # O 列不写入，保留模板原值
             }
             records.append(record)
 
@@ -201,4 +232,7 @@ if template_file and data_file:
         st.error(f"❌ 处理失败：{e}")
         st.exception(e)
 else:
-    st.info("👆 请同时上传模板文件和航段数据文件。")
+    if st.session_state.template_wb is None:
+        st.info("👆 请先上传模板。")
+    else:
+        st.info("👆 请上传航段数据 Excel 文件。")

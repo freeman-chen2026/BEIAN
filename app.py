@@ -2,11 +2,10 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="填入模板生成备案表", layout="wide")
 st.title("🛫 填入模板生成备案表")
-st.markdown("上传模板和数据，自动填入指定行，保留模板所有格式。")
+st.markdown("上传模板和数据，自动填入指定列，保留模板所有格式。")
 
 # ---------- 注册号 -> ICAO 机型映射 ----------
 DEFAULT_ICAO_MAP = {
@@ -63,7 +62,12 @@ def format_time(value):
         return value.strftime("%H:%M:%S")
     return str(value)
 
-# ---------- 侧边栏：映射管理 ----------
+# ---------- 侧边栏：自定义固定值 ----------
+st.sidebar.header("✏️ 自定义固定填入值")
+default_supervision = st.sidebar.text_input("所属监管局（A列）", value="深圳局")
+default_operator = st.sidebar.text_input("运行人标准名称（B列）", value="天成商务航空有限公司")
+default_run_type = st.sidebar.text_input("选择允许的运行种类（O列）", value="3.公务航空运行")
+
 st.sidebar.header("✈️ 注册号 → ICAO 机型映射")
 user_mapping_text = st.sidebar.text_area(
     "自定义映射（覆盖内置）",
@@ -93,17 +97,17 @@ data_file = st.file_uploader("上传航段数据导出 Excel", type=["xlsx"], ke
 
 if template_file and data_file:
     try:
-        # 1. 读取数据
+        # 读取数据
         df_raw = parse_uploaded_file(data_file)
         st.success(f"✅ 成功读取 {len(df_raw)} 条航段记录")
         if len(df_raw) > 20:
             st.warning(f"数据条数（{len(df_raw)}）超过模板预设的20行，多余数据将被忽略。")
 
-        # 2. 加载模板
+        # 加载模板
         wb = load_workbook(template_file)
         ws = wb.active
 
-        # 3. 确定表头行（第1行，或包含“所属监管局”的行）
+        # 确定表头行（包含“所属监管局”）
         header_row = None
         for row in range(1, 5):
             if any("所属监管局" in str(cell.value) for cell in ws[row]):
@@ -113,15 +117,10 @@ if template_file and data_file:
             st.error("模板中未找到表头行，请确认模板有“所属监管局”字段。")
             st.stop()
 
-        # 4. 数据起始行（表头下一行）
         data_start_row = header_row + 1
+        group_rows = 4  # 每组占4行（根据模板设计）
 
-        # 5. 每组占多少行（从模板推断，假设每4行一组）
-        #    用户可以自定义，但我们从模板中找规律：找第一个非空行，然后找下一个非空行，计算间距
-        #    简单起见，我们假设用户模板中每组占4行（如2-5,6-9,10-13...）
-        group_rows = 4
-
-        # 6. 准备新数据（按原始顺序，取前20条）
+        # 准备数据（最多20条）
         has_actual_depart = "实际出发" in df_raw.columns
         records = []
         for idx, row in df_raw.iterrows():
@@ -149,44 +148,41 @@ if template_file and data_file:
             icao_type = icao_map.get(reg, "")
 
             record = {
-                "A": "深圳局",
-                "B": "天成商务航空有限公司",
+                "A": default_supervision,
+                "B": default_operator,
                 "C": flight_date,
                 "D": run_type,
                 "E": oper_type,
                 "F": icao_type,
                 "G": reg,
-                "H": "是",
-                "I": "是",
                 "J": start_time,
                 "K": est_landing,
                 "L": is_landed,
                 "M": actual_end if is_landed == "是" else "",
                 "N": route,
-                "O": "3.公务航空运行",
-                "P": ""
+                "O": default_run_type,
             }
             records.append(record)
 
-        # 7. 写入数据（只修改每组的第一行）
-        #    组首行号 = data_start_row + i * group_rows
+        # 写入数据（只修改指定列，H、I、P保留模板原有值）
         for i, rec in enumerate(records):
             row_num = data_start_row + i * group_rows
-            # 列顺序：A到P
-            col_letters = "ABCDEFGHIJKLMNOP"
-            for col_letter, value in zip(col_letters, [
-                rec["A"], rec["B"], rec["C"], rec["D"], rec["E"],
-                rec["F"], rec["G"], rec["H"], rec["I"], rec["J"],
-                rec["K"], rec["L"], rec["M"], rec["N"], rec["O"], rec["P"]
-            ]):
-                cell = ws[f"{col_letter}{row_num}"]
-                cell.value = value
-                # 注意：我们只修改值，不修改样式，所以保留原有样式
+            ws[f"A{row_num}"] = rec["A"]
+            ws[f"B{row_num}"] = rec["B"]
+            ws[f"C{row_num}"] = rec["C"]
+            ws[f"D{row_num}"] = rec["D"]
+            ws[f"E{row_num}"] = rec["E"]
+            ws[f"F{row_num}"] = rec["F"]
+            ws[f"G{row_num}"] = rec["G"]
+            ws[f"J{row_num}"] = rec["J"]
+            ws[f"K{row_num}"] = rec["K"]
+            ws[f"L{row_num}"] = rec["L"]
+            ws[f"M{row_num}"] = rec["M"]
+            ws[f"N{row_num}"] = rec["N"]
+            ws[f"O{row_num}"] = rec["O"]
+            # H, I, P 不写入，保留模板原有内容
 
-        # 8. 如果数据条数少于模板行数，多余的行保留不动（已经是空或旧数据，可能需清空？）
-        #    但模板本来就是空行，所以无需处理。
-
-        # 9. 保存到内存
+        # 保存
         output = BytesIO()
         wb.save(output)
         output.seek(0)

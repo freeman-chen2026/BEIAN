@@ -5,7 +5,7 @@ from openpyxl import load_workbook
 
 st.set_page_config(page_title="填入模板生成备案表", layout="wide")
 st.title("🛫 填入模板生成备案表")
-st.markdown("上传模板和数据，自动填入指定列，保留模板所有格式。")
+st.markdown("上传模板和数据，自动填入指定列，保留模板所有格式（O列不动）。")
 
 # ---------- 注册号 -> ICAO 机型映射 ----------
 DEFAULT_ICAO_MAP = {
@@ -63,10 +63,9 @@ def format_time(value):
     return str(value)
 
 # ---------- 侧边栏：自定义固定值 ----------
-st.sidebar.header("✏️ 自定义固定填入值")
+st.sidebar.header("✏️ 自定义固定填入值（A、B列）")
 default_supervision = st.sidebar.text_input("所属监管局（A列）", value="深圳局")
 default_operator = st.sidebar.text_input("运行人标准名称（B列）", value="天成商务航空有限公司")
-default_run_type = st.sidebar.text_input("选择允许的运行种类（O列）", value="3.公务航空运行")
 
 st.sidebar.header("✈️ 注册号 → ICAO 机型映射")
 user_mapping_text = st.sidebar.text_area(
@@ -160,11 +159,11 @@ if template_file and data_file:
                 "L": is_landed,
                 "M": actual_end if is_landed == "是" else "",
                 "N": route,
-                "O": default_run_type,
+                # O 列不写入，保留模板原值
             }
             records.append(record)
 
-        # 写入数据（只修改指定列，H、I、P保留模板原有值）
+        # 写入数据（只修改指定列，O、H、I、P保留模板原有值）
         for i, rec in enumerate(records):
             row_num = data_start_row + i * group_rows
             ws[f"A{row_num}"] = rec["A"]
@@ -179,8 +178,7 @@ if template_file and data_file:
             ws[f"L{row_num}"] = rec["L"]
             ws[f"M{row_num}"] = rec["M"]
             ws[f"N{row_num}"] = rec["N"]
-            ws[f"O{row_num}"] = rec["O"]
-            # H, I, P 不写入，保留模板原有内容
+            # O 不写入，H、I、P 也不写入，保留模板原有
 
         # 保存
         output = BytesIO()

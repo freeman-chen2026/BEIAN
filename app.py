@@ -1,9 +1,12 @@
 import streamlit as st
 import pandas as pd
+from io import BytesIO
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
-st.set_page_config(page_title="航段数据转文本表格", layout="wide")
-st.title("🛫 航段数据转可粘贴文本")
-st.markdown("上传航段 Excel，生成制表符分隔的纯文本，复制后粘贴到模板中（用“选择性粘贴-数值”）。")
+st.set_page_config(page_title="填入模板生成备案表", layout="wide")
+st.title("🛫 填入模板生成备案表")
+st.markdown("上传模板和数据，自动填入指定行，保留模板所有格式。")
 
 # ---------- 注册号 -> ICAO 机型映射 ----------
 DEFAULT_ICAO_MAP = {
@@ -83,20 +86,47 @@ for k, v in DEFAULT_ICAO_MAP.items():
     if k not in icao_map:
         icao_map[k] = v
 
-# ---------- 主界面 ----------
-uploaded_file = st.file_uploader("上传航段数据导出 Excel", type=["xlsx"])
+# ---------- 上传文件 ----------
+st.subheader("📂 上传文件")
+template_file = st.file_uploader("上传带格式的模板 Excel（含20条空行）", type=["xlsx"], key="template")
+data_file = st.file_uploader("上传航段数据导出 Excel", type=["xlsx"], key="data")
 
-if uploaded_file is not None:
+if template_file and data_file:
     try:
-        df_raw = parse_uploaded_file(uploaded_file)
+        # 1. 读取数据
+        df_raw = parse_uploaded_file(data_file)
         st.success(f"✅ 成功读取 {len(df_raw)} 条航段记录")
+        if len(df_raw) > 20:
+            st.warning(f"数据条数（{len(df_raw)}）超过模板预设的20行，多余数据将被忽略。")
 
+        # 2. 加载模板
+        wb = load_workbook(template_file)
+        ws = wb.active
+
+        # 3. 确定表头行（第1行，或包含“所属监管局”的行）
+        header_row = None
+        for row in range(1, 5):
+            if any("所属监管局" in str(cell.value) for cell in ws[row]):
+                header_row = row
+                break
+        if header_row is None:
+            st.error("模板中未找到表头行，请确认模板有“所属监管局”字段。")
+            st.stop()
+
+        # 4. 数据起始行（表头下一行）
+        data_start_row = header_row + 1
+
+        # 5. 每组占多少行（从模板推断，假设每4行一组）
+        #    用户可以自定义，但我们从模板中找规律：找第一个非空行，然后找下一个非空行，计算间距
+        #    简单起见，我们假设用户模板中每组占4行（如2-5,6-9,10-13...）
+        group_rows = 4
+
+        # 6. 准备新数据（按原始顺序，取前20条）
         has_actual_depart = "实际出发" in df_raw.columns
-        if not has_actual_depart:
-            st.info("注意：Excel 中没有'实际出发'列，将使用'计划出发'作为飞行开始时间。")
-
         records = []
-        for _, row in df_raw.iterrows():
+        for idx, row in df_raw.iterrows():
+            if idx >= 20:
+                break
             dt = pd.to_datetime(row["出发日期"])
             flight_date = f"{dt.year}/{dt.month}/{dt.day}"
 
@@ -119,58 +149,62 @@ if uploaded_file is not None:
             icao_type = icao_map.get(reg, "")
 
             record = {
-                "所属监管局": "深圳局",
-                "运行人标准名称": "天成商务航空有限公司",
-                "飞行活动的日期": flight_date,
-                "当日飞行的运行种类": run_type,
-                "当日飞行的经营种类": oper_type,
-                "航空器型号": icao_type,
-                "航空器注册号": reg,
-                "是否向监控中心完成计划备案": "是",
-                "是否获得飞行计划部门批准飞行": "是",
-                "飞行开始时间": start_time,
-                "飞行预计落地时间": est_landing,
-                "是否已落地": is_landed,
-                "飞行实际结束时间": actual_end if is_landed == "是" else "",
-                "飞行地点（航线）": route,
-                "选择允许的运行种类": "3.公务航空运行",
-                "监管局是否电话跟踪该飞行动态": ""
+                "A": "深圳局",
+                "B": "天成商务航空有限公司",
+                "C": flight_date,
+                "D": run_type,
+                "E": oper_type,
+                "F": icao_type,
+                "G": reg,
+                "H": "是",
+                "I": "是",
+                "J": start_time,
+                "K": est_landing,
+                "L": is_landed,
+                "M": actual_end if is_landed == "是" else "",
+                "N": route,
+                "O": "3.公务航空运行",
+                "P": ""
             }
             records.append(record)
 
-        df_output = pd.DataFrame(records)
+        # 7. 写入数据（只修改每组的第一行）
+        #    组首行号 = data_start_row + i * group_rows
+        for i, rec in enumerate(records):
+            row_num = data_start_row + i * group_rows
+            # 列顺序：A到P
+            col_letters = "ABCDEFGHIJKLMNOP"
+            for col_letter, value in zip(col_letters, [
+                rec["A"], rec["B"], rec["C"], rec["D"], rec["E"],
+                rec["F"], rec["G"], rec["H"], rec["I"], rec["J"],
+                rec["K"], rec["L"], rec["M"], rec["N"], rec["O"], rec["P"]
+            ]):
+                cell = ws[f"{col_letter}{row_num}"]
+                cell.value = value
+                # 注意：我们只修改值，不修改样式，所以保留原有样式
 
-        # ---------- 预览 ----------
-        st.subheader("📋 数据预览（按原始顺序）")
-        st.dataframe(df_output, use_container_width=True)
+        # 8. 如果数据条数少于模板行数，多余的行保留不动（已经是空或旧数据，可能需清空？）
+        #    但模板本来就是空行，所以无需处理。
 
-        # ---------- 生成制表符分隔的纯文本 ----------
-        headers = list(df_output.columns)
-        tsv_lines = ["\t".join(headers)]
-        for _, row in df_output.iterrows():
-            tsv_lines.append("\t".join([str(v) for v in row]))
-        tsv_text = "\n".join(tsv_lines)
+        # 9. 保存到内存
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
 
-        st.subheader("📄 复制以下纯文本（制表符分隔）")
-        st.text_area(
-            label="全选复制（Ctrl+A，Ctrl+C）",
-            value=tsv_text,
-            height=300,
-            key="tsv_area"
-        )
-        st.caption("💡 复制后，在模板 Excel 中右键 → 选择性粘贴 → 数值，即可只填入数据，保留模板格式。")
+        # 预览
+        preview_df = pd.DataFrame(records)
+        st.subheader("📋 数据预览（按原始顺序，最多20条）")
+        st.dataframe(preview_df, use_container_width=True)
 
-        # ---------- 下载 CSV（UTF-8-BOM） ----------
-        csv_bytes = df_output.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
         st.download_button(
-            label="⬇️ 下载 CSV 文件（用 Excel 打开后全选复制，同样可选择性粘贴）",
-            data=csv_bytes,
-            file_name="航段数据_纯文本.csv",
-            mime="text/csv"
+            label="⬇️ 下载填入数据的模板文件",
+            data=output,
+            file_name="每日通航运行情况跟踪表_生成.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
     except Exception as e:
         st.error(f"❌ 处理失败：{e}")
         st.exception(e)
 else:
-    st.info("👆 请上传航段数据 Excel 文件。")
+    st.info("👆 请同时上传模板文件和航段数据文件。")

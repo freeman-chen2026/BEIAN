@@ -6,7 +6,7 @@ from copy import copy
 
 st.set_page_config(page_title="每日通航运行情况跟踪表生成器", layout="wide")
 st.title("🛫 每日通航运行情况跟踪表生成器")
-st.markdown("上传模板Excel和数据Excel，生成带格式的备案表格。")
+st.markdown("上传模板和数据，自动替换数据，格式完全保留。")
 
 # ---------- 注册号 -> ICAO 机型映射 ----------
 DEFAULT_ICAO_MAP = {
@@ -88,8 +88,8 @@ for k, v in DEFAULT_ICAO_MAP.items():
 
 # ---------- 主界面 ----------
 st.subheader("📂 上传文件")
-template_file = st.file_uploader("【模板】上传带格式的 Excel 模板（如 每日通航运行情况跟踪表（天成商务航空有限公司）20260708.xlsx）", type=["xlsx"], key="template")
-data_file = st.file_uploader("【数据】上传航段数据导出 Excel（如 航段数据导出 (40).xlsx）", type=["xlsx"], key="data")
+template_file = st.file_uploader("上传带格式的模板 Excel（必须有表头和数据行）", type=["xlsx"], key="template")
+data_file = st.file_uploader("上传航段数据导出 Excel", type=["xlsx"], key="data")
 
 if template_file and data_file:
     try:
@@ -97,29 +97,24 @@ if template_file and data_file:
         df_raw = parse_uploaded_file(data_file)
         st.success(f"✅ 成功读取 {len(df_raw)} 条航段记录")
 
-        # 2. 加载模板工作簿
-        template_io = BytesIO(template_file.read())
-        wb = load_workbook(template_io)
+        # 2. 加载模板
+        wb = load_workbook(template_file)
         ws = wb.active
 
-        # 3. 确定表头行和数据起始行（假设表头在第2行，数据从第3行开始）
-        header_row = 2
+        # 3. 查找表头行（包含“所属监管局”等）
+        header_row = None
+        for row in range(1, 10):
+            if any("所属监管局" in str(cell.value) for cell in ws[row]):
+                header_row = row
+                break
+        if header_row is None:
+            st.error("模板中未找到表头行（包含“所属监管局”），请检查模板。")
+            st.stop()
+
+        # 4. 数据起始行（表头下一行）
         data_start_row = header_row + 1
 
-        # 4. 获取数据起始行（第3行）的样式，用于新增行
-        style_row = data_start_row
-        style_cells = {}
-        for col in range(1, ws.max_column + 1):
-            cell = ws.cell(row=style_row, column=col)
-            style_cells[col] = {
-                "font": copy(cell.font),
-                "fill": copy(cell.fill),
-                "border": copy(cell.border),
-                "alignment": copy(cell.alignment),
-                "number_format": cell.number_format
-            }
-
-        # 5. 清空旧数据（从 data_start_row 到最大行）
+        # 5. 清空所有旧数据行（从 data_start_row 到最后）
         max_row = ws.max_row
         if max_row >= data_start_row:
             ws.delete_rows(data_start_row, max_row - data_start_row + 1)
@@ -169,22 +164,34 @@ if template_file and data_file:
             }
             records.append(record)
 
-        # 7. 写入新数据（如果数据行数超过模板原有样式行数，新增行复制样式）
+        # 7. 复制模板中第一条数据行的样式（如果原本有数据）或从表头复制样式
+        # 但更好：从表头行复制样式，因为我们删除了所有数据行。
+        # 我们直接使用表头行的样式作为蓝本，但数据行通常有不同样式（如背景色），
+        # 因此我们构建一个“样式行”：
+        # 在模板中可能存在合并单元格，我们不考虑合并，只复制每个单元格样式。
+        style_row = None
+        # 尝试找到一个非空的数据行（如果模板有旧数据），否则使用表头行
+        for row in range(data_start_row, min(data_start_row + 3, ws.max_row + 1)):
+            if any(ws.cell(row=row, column=col).value for col in range(1, 17)):
+                style_row = row
+                break
+        if style_row is None:
+            style_row = header_row  # 若没找到数据行，则用表头样式
+
+        style_cells = {}
+        for col in range(1, 17):
+            cell = ws.cell(row=style_row, column=col)
+            style_cells[col] = {
+                "font": copy(cell.font),
+                "fill": copy(cell.fill),
+                "border": copy(cell.border),
+                "alignment": copy(cell.alignment),
+                "number_format": cell.number_format
+            }
+
+        # 8. 写入新数据并复制样式
         for i, rec in enumerate(records):
             row_num = data_start_row + i
-            # 如果当前行超出原有最大行，需要插入新行并复制样式
-            if row_num > ws.max_row:
-                ws.insert_rows(row_num)
-                # 复制上一行的样式到新行
-                for col in range(1, ws.max_column + 1):
-                    src_cell = ws.cell(row=row_num - 1, column=col)
-                    dst_cell = ws.cell(row=row_num, column=col)
-                    dst_cell.font = copy(src_cell.font)
-                    dst_cell.fill = copy(src_cell.fill)
-                    dst_cell.border = copy(src_cell.border)
-                    dst_cell.alignment = copy(src_cell.alignment)
-                    dst_cell.number_format = src_cell.number_format
-
             col_names = [
                 "所属监管局", "运行人标准名称", "飞行活动的日期", "当日飞行的运行种类", "当日飞行的经营种类",
                 "航空器型号", "航空器注册号", "是否向监控中心完成计划备案", "是否获得飞行计划部门批准飞行",
@@ -194,18 +201,12 @@ if template_file and data_file:
             for col_idx, col_name in enumerate(col_names, start=1):
                 cell = ws.cell(row=row_num, column=col_idx)
                 cell.value = rec[col_name]
-                # 确保样式正确（如果新增行已复制样式，这里无需再复制；但为了安全，也可以重新应用样式）
-                # 对于已有行，我们也重新应用样式以保证格式统一
-                # 但为了保留模板原有样式（如某些行可能特殊），我们只在新行复制样式。
-                # 这里我们简单处理：如果该行是新增的（row_num > 原始行数），样式已复制，无需再处理。
-                # 如果该行原本存在，我们保留其原有样式（因为只是覆盖值）
-                # 所以这里只赋值，不改变样式。
-                # 但为了统一，我们可以对所有行应用样式，但不覆盖可能不同的特殊格式（如合并单元格等）。
-                # 最佳实践：只赋值，样式已在之前复制或保留。
-                pass
-
-        # 8. 如果数据行数少于模板原来行数，多余行已被删除（步骤5已删除全部旧数据）
-        # 此时写入数据后，行数正好等于数据条数，若模板原来有多余空行，已被删除。
+                style = style_cells[col_idx]
+                cell.font = style["font"]
+                cell.fill = style["fill"]
+                cell.border = style["border"]
+                cell.alignment = style["alignment"]
+                cell.number_format = style["number_format"]
 
         # 9. 保存
         output = BytesIO()
@@ -228,4 +229,4 @@ if template_file and data_file:
         st.error(f"❌ 处理失败：{e}")
         st.exception(e)
 else:
-    st.info("👆 请同时上传模板和数据文件。")
+    st.info("👆 请同时上传模板文件和航段数据文件。")

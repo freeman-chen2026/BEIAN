@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 from openpyxl import load_workbook
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="填入模板生成备案表", layout="wide")
 st.title("🛫 填入模板生成备案表")
@@ -48,6 +49,7 @@ def map_usage(usage):
         return "公务飞行", "私用飞行"
 
 def format_time(value):
+    """将时间值格式化为 HH:MM:SS，若为空则返回空字符串"""
     if pd.isna(value) or value == "" or value is None:
         return ""
     if isinstance(value, str):
@@ -61,6 +63,50 @@ def format_time(value):
     if hasattr(value, "strftime"):
         return value.strftime("%H:%M:%S")
     return str(value)
+
+def parse_duration_to_minutes(duration_str):
+    """将 'HH:MM' 或 'HH:MM:SS' 转换为分钟数（整数）"""
+    if pd.isna(duration_str) or duration_str == "" or duration_str is None:
+        return None
+    s = str(duration_str).strip()
+    # 尝试用 datetime 解析
+    try:
+        # 处理可能只有 MM:SS 的情况，补足小时
+        if s.count(":") == 1:
+            parts = s.split(":")
+            if len(parts) == 2:
+                # 可能是 MM:SS 或 HH:MM，我们按 HH:MM 处理（因为预计飞行时间通常用HH:MM）
+                # 但为了安全，若第一个数字小于24且第二个小于60，当作HH:MM
+                h = int(parts[0])
+                m = int(parts[1])
+                return h * 60 + m
+        elif s.count(":") == 2:
+            parts = s.split(":")
+            h = int(parts[0])
+            m = int(parts[1])
+            # 忽略秒
+            return h * 60 + m
+        else:
+            # 可能纯数字表示分钟
+            return int(float(s))
+    except:
+        return None
+
+def combine_date_time(date_val, time_val):
+    """将日期和时间合并为 datetime 对象"""
+    if pd.isna(date_val) or pd.isna(time_val):
+        return None
+    try:
+        date_str = str(date_val).strip()
+        time_str = str(time_val).strip()
+        # 如果时间没有秒，补 :00
+        if time_str.count(":") == 2:
+            dt_str = f"{date_str} {time_str}"
+        else:
+            dt_str = f"{date_str} {time_str}:00"
+        return pd.to_datetime(dt_str)
+    except:
+        return None
 
 # ---------- 侧边栏：自定义固定值 ----------
 st.sidebar.header("✏️ 自定义固定填入值（A、B列）")
@@ -151,30 +197,76 @@ if data_file and st.session_state.template_wb is not None:
         data_start_row = st.session_state.data_start_row
         group_rows = st.session_state.group_rows
 
-        # 准备数据（最多20条）
+        # 检查必要列
         has_actual_depart = "实际出发" in df_raw.columns
+        has_estimated_flight_time = "预计飞行时间" in df_raw.columns
+        if not has_estimated_flight_time:
+            st.warning("数据中没有“预计飞行时间”列，将使用原“预计到达”作为K列值。")
+
+        # 准备数据（最多20条）
         records = []
         for idx, row in df_raw.iterrows():
             if idx >= 20:
                 break
+
+            # 日期
             dt = pd.to_datetime(row["出发日期"])
             flight_date = f"{dt.year}/{dt.month}/{dt.day}"
 
+            # 航线
             dep_city = str(row.get("出发城市", "")).strip()
             arr_city = str(row.get("到达城市", "")).strip()
             route = f"{dep_city}-{arr_city}" if dep_city and arr_city else f"{row['出发地']}-{row['到达地']}"
+
+            # 运行种类
             run_type, oper_type = map_usage(row["用途"])
 
+            # 飞行开始时间（实际出发或计划出发）
             if has_actual_depart:
                 actual_depart = format_time(row.get("实际出发", ""))
-                start_time = actual_depart if actual_depart else format_time(row.get("计划出发", ""))
+                if actual_depart:
+                    start_time = actual_depart
+                else:
+                    start_time = format_time(row.get("计划出发", ""))
             else:
                 start_time = format_time(row.get("计划出发", ""))
 
-            est_landing = format_time(row.get("预计到达", ""))
+            # ---- 计算预计落地时间（K列） ----
+            # 优先使用 “出发时间 + 预计飞行时间”
+            estimated_landing = ""
+            if has_estimated_flight_time:
+                duration_str = row.get("预计飞行时间", "")
+                minutes = parse_duration_to_minutes(duration_str)
+                if minutes is not None:
+                    # 获取出发日期和实际/计划出发时间，构建完整 datetime
+                    date_val = row["出发日期"]
+                    # 获取时间值（实际出发或计划出发）
+                    if has_actual_depart and pd.notna(row.get("实际出发")):
+                        time_val = row["实际出发"]
+                    else:
+                        time_val = row["计划出发"]
+                    if pd.notna(date_val) and pd.notna(time_val):
+                        dt_obj = combine_date_time(date_val, time_val)
+                        if dt_obj is not None:
+                            # 加上分钟数
+                            new_dt = dt_obj + timedelta(minutes=minutes)
+                            estimated_landing = new_dt.strftime("%H:%M:%S")
+                # 如果计算失败，则回退到“预计到达”
+                if not estimated_landing and "预计到达" in df_raw.columns:
+                    estimated_landing = format_time(row.get("预计到达", ""))
+            else:
+                # 无预计飞行时间，直接用“预计到达”
+                if "预计到达" in df_raw.columns:
+                    estimated_landing = format_time(row.get("预计到达", ""))
+
+            # 实际结束时间（M列）
             actual_end = format_time(row.get("实际到达", "")) if "实际到达" in df_raw.columns else ""
+
+            # 是否已落地
             status = str(row.get("航段状态", "")).strip()
             is_landed = "是" if status in ["已执飞", "已完成"] else "否"
+
+            # 注册号及机型
             reg = str(row["飞机注册号"]).strip().upper()
             icao_type = icao_map.get(reg, "")
 
@@ -187,7 +279,7 @@ if data_file and st.session_state.template_wb is not None:
                 "F": icao_type,
                 "G": reg,
                 "J": start_time,
-                "K": est_landing,
+                "K": estimated_landing,
                 "L": is_landed,
                 "M": actual_end if is_landed == "是" else "",
                 "N": route,
